@@ -56,14 +56,14 @@ pub const TypeDef = struct {
 // Struct for if statements
 pub const IfStatement = struct {
     condition: ?*Expr,
-    then_branch: []Expr,
-    else_branch: []Expr,
+    then_branch: []*Expr,
+    else_branch: []*Expr,
 };
 
 // Struct for loops
 pub const Loop = struct {
     condition: ?*Expr,
-    body: []Expr,
+    body: []*Expr,
 };
 
 pub const Binary = struct {
@@ -90,7 +90,7 @@ pub const Expr = union(enum) {
     IfStatement: IfStatement,
     Loop: Loop,
     Program: []*Expr,
-    Stmt: []Expr,
+    Stmt: []*Expr,
 };
 
 pub fn codegen(
@@ -98,6 +98,7 @@ pub fn codegen(
     module: llvm.LLVMModuleRef,
     builder: llvm.LLVMBuilderRef,
     context: ?llvm.LLVMContextRef,
+    func: ?llvm.LLVMValueRef,
     symbol_table: *std.StringArrayHashMap(?llvm.LLVMValueRef),
     allocator: std.mem.Allocator,
 ) !llvm.LLVMValueRef {
@@ -106,8 +107,8 @@ pub fn codegen(
 
     return try switch (t_expr) {
         .Binary => |binary| {
-            const left = try codegen(binary.left, module, builder, context, symbol_table, allocator);
-            const right = try codegen(binary.right, module, builder, context, symbol_table, allocator);
+            const left = try codegen(binary.left, module, builder, context, null, symbol_table, allocator);
+            const right = try codegen(binary.right, module, builder, context, null, symbol_table, allocator);
             return switch (binary.op) {
                 .Add => llvm.LLVMBuildAdd(builder, left, right, "addtmp"),
                 .Subtract => llvm.LLVMBuildSub(builder, left, right, "subtmp"),
@@ -116,7 +117,7 @@ pub fn codegen(
             };
         },
         .Unary => |unary| {
-            const operand = try codegen(unary.expr, module, builder, context, symbol_table, allocator);
+            const operand = try codegen(unary.expr, module, builder, context, null, symbol_table, allocator);
             return switch (unary.op) {
                 .Negate => llvm.LLVMBuildNeg(builder, operand, "negtmp"),
                 .Not => llvm.LLVMBuildNot(builder, operand, "nottmp"),
@@ -153,7 +154,7 @@ pub fn codegen(
         },
 
         .Assignment => |assignment| {
-            const value = try codegen(assignment.expr, module, builder, context, symbol_table, allocator);
+            const value = try codegen(assignment.expr, module, builder, context, null, symbol_table, allocator);
             // RHS should be a llvmValueRef
             if (value == null) {
                 return error.NullValue;
@@ -186,7 +187,7 @@ pub fn codegen(
             var paramsRef = try allocator.alloc(llvm.LLVMValueRef, funcDef.params.len);
 
             for (funcDef.params, 0..) |*param, i| {
-                paramsRef[i] = try codegen(param, module, builder, context, symbol_table, allocator);
+                paramsRef[i] = try codegen(param, module, builder, context, null, symbol_table, allocator);
             }
 
             var paramTypes = try allocator.alloc(llvm.LLVMTypeRef, funcDef.params.len);
@@ -195,7 +196,7 @@ pub fn codegen(
                 paramTypes[i] = llvm.LLVMTypeOf(paramRef);
             }
 
-            var returnType = try codegen(funcDef.return_type, module, builder, context, symbol_table, allocator);
+            var returnType = try codegen(funcDef.return_type, module, builder, context, null, symbol_table, allocator);
             _ = returnType;
 
             const funcType = llvm.LLVMFunctionType(
@@ -206,17 +207,17 @@ pub fn codegen(
             );
 
             // Create the function
-            const func = llvm.LLVMAddFunction(module, "func", funcType);
+            const func_def = llvm.LLVMAddFunction(module, "func", funcType);
             // Create a basic block
-            const entry = llvm.LLVMAppendBasicBlock(func, "entry");
+            const entry = llvm.LLVMAppendBasicBlock(func_def, "entry");
             _ = entry;
             // Create a builder for the basic block
             const funcBuilder = llvm.LLVMCreateBuilder();
 
-            var body = try codegen(funcDef.body, module, funcBuilder, context, symbol_table, allocator);
+            var body = try codegen(funcDef.body, module, funcBuilder, context, null, symbol_table, allocator);
             _ = body;
 
-            return func;
+            return func_def;
         },
         .Program => |program| {
             // create main function
@@ -232,15 +233,42 @@ pub fn codegen(
             llvm.LLVMPositionBuilderAtEnd(mainBuilder, entry);
 
             for (program) |program_expr| {
-                _ = try codegen(program_expr, module, mainBuilder, context, symbol_table, allocator);
+                _ = try codegen(program_expr, module, mainBuilder, context, mainFunc, symbol_table, allocator);
             }
             return null;
         },
-        // .Loop => |loop| {
-        //     _ = loop;
-        //     // create a body, latch and exit block to context
+        .Loop => |loop| {
+            // create a body, latch and exit block to context
+            const body = llvm.LLVMAppendBasicBlockInContext(context.?, func.?, "body");
+            const latch = llvm.LLVMAppendBasicBlockInContext(context.?, func.?, "latch");
+            const exit = llvm.LLVMAppendBasicBlockInContext(context.?, func.?, "exit");
 
-        // },
+            // create a builder for the body
+            const bodyBuilder = llvm.LLVMCreateBuilderInContext(context.?);
+            llvm.LLVMPositionBuilderAtEnd(bodyBuilder, body);
+
+            // create a builder for the latch
+            const latchBuilder = llvm.LLVMCreateBuilderInContext(context.?);
+            llvm.LLVMPositionBuilderAtEnd(latchBuilder, latch);
+
+            // create a builder for the exit
+            const exitBuilder = llvm.LLVMCreateBuilderInContext(context.?);
+            llvm.LLVMPositionBuilderAtEnd(exitBuilder, exit);
+
+            // create a condition
+            const condition = try codegen(loop.condition, module, bodyBuilder, context.?, func.?, symbol_table, allocator);
+            // create body
+            for (loop.body) |body_expr| {
+                _ = try codegen(body_expr, module, bodyBuilder, context.?, func.?, symbol_table, allocator);
+            }
+            // create a branch
+            _ = llvm.LLVMBuildCondBr(bodyBuilder, condition, body, exit);
+            // create a branch
+            _ = llvm.LLVMBuildBr(latchBuilder, body);
+            // create a branch
+            _ = llvm.LLVMBuildBr(exitBuilder, latch);
+            return null;
+        },
         else => unreachable,
     };
 }
@@ -248,19 +276,23 @@ pub fn codegen(
 pub fn main() !void {
     var a = Identifier{ .name = "a" };
     var a_expr = Expr{ .Identifier = a };
-    var ten = Expr{ .Literal = Literal{ .i32 = 10 } };
-    var a_assign_10 = Expr{ .Assignment = Assignment{ .identifier = a, .expr = &ten } };
-    var a_plus_10 = Expr{
+    var one = Expr{ .Literal = Literal{ .i32 = 1 } };
+    var a_assign = Expr{ .Assignment = Assignment{ .identifier = a, .expr = &one } };
+    var a_plus = Expr{
         .Binary = Binary{
             .op = BinaryOp.Add,
             .left = &a_expr,
-            .right = &ten,
+            .right = &one,
         },
     };
-    var a_assign_a_plus_10 = Expr{
-        .Assignment = Assignment{ .identifier = a, .expr = &a_plus_10 },
+    var a_assign_a_plus = Expr{
+        .Assignment = Assignment{ .identifier = a, .expr = &a_plus },
     };
-    var program_exprs = [_]*Expr{ &a_assign_10, &a_assign_a_plus_10 };
+
+    var loop_body = [_]*Expr{&a_assign_a_plus};
+    var loop_condition = Expr{ .Binary = Binary{ .op = BinaryOp.Add, .left = &a_expr, .right = &one } };
+    var loop_expr = Expr{ .Loop = Loop{ .condition = &loop_condition, .body = &loop_body } };
+    var program_exprs = [_]*Expr{ &a_assign, &a_assign_a_plus, &loop_expr };
 
     var program = Expr{ .Program = &program_exprs };
 
@@ -280,88 +312,25 @@ pub fn main() !void {
 
     // Create a new LLVM module
     const context = llvm.LLVMGetGlobalContext();
-    const module = llvm.LLVMModuleCreateWithNameInContext("test", context);
+    const module = llvm.LLVMModuleCreateWithNameInContext("main", context);
     const builder = llvm.LLVMCreateBuilderInContext(context);
-    // defer {
-    //     llvm.LLVMDisposeBuilder(builder);
-    //     llvm.LLVMDisposeModule(module);
-    //     llvm.LLVMContextDispose(context);
-    //     llvm.LLVMShutdown();
-    // }
+    defer {
+        llvm.LLVMDisposeBuilder(builder);
+        llvm.LLVMDisposeModule(module);
+        // llvm.LLVMContextDispose(context);
+        llvm.LLVMShutdown();
+    }
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
-
-    {}
     // Declare and initialize the hashmap
     var symbol_table = std.StringArrayHashMap(
         ?llvm.LLVMValueRef,
     ).init(allocator);
     defer symbol_table.deinit();
 
-    var ref = try codegen(&program, module, builder, context, &symbol_table, allocator);
+    var ref = try codegen(&program, module, builder, context, null, &symbol_table, allocator);
     _ = ref;
     llvm.LLVMDumpModule(module);
 }
-
-// lets build tests to test the codegen
-
-// pub fn test_setup() !type {
-//     // Initialize LLVM
-//     if (llvm.LLVMInitializeNativeTarget() != 0) {
-//         std.log.err("Failed to initialize native target\n", .{});
-//         return error.Unreachable;
-//     }
-//     if (llvm.LLVMInitializeNativeAsmPrinter() != 0) {
-//         std.log.err("Failed to initialize native asm printer\n", .{});
-//         return error.Unreachable;
-//     }
-//     if (llvm.LLVMInitializeNativeAsmParser() != 0) {
-//         std.log.err("Failed to initialize native asm parser\n", .{});
-//         return error.Unreachable;
-//     }
-
-//     // Create a new LLVM module
-//     const context = llvm.LLVMGetGlobalContext();
-//     const module = llvm.LLVMModuleCreateWithNameInContext("test", context);
-//     const builder = llvm.LLVMCreateBuilderInContext(context);
-
-//     return .{ .context = context, .module = module, .builder = builder };
-// }
-
-// fn test_teardown(context: llvm.LLVMContextRef, module: llvm.LLVMModuleRef, builder: llvm.LLVMBuilderRef) void {
-//     llvm.LLVMShutdown();
-
-//     llvm.LLVMDisposeBuilder(builder);
-//     llvm.LLVMDisposeModule(module);
-//     llvm.LLVMContextDispose(context);
-// }
-
-// test "binary" {
-//     const ctx = try test_setup();
-//     defer test_teardown(ctx.context, ctx.module, ctx.builder);
-
-//     // Your implementation for the "binary" test goes here
-//     const a = llvm.LLVMConstInt(llvm.LLVMInt32Type(), 5, false);
-//     const b = llvm.LLVMConstInt(llvm.LLVMInt32Type(), 10, false);
-//     const expectedAST = llvm.LLVMBuildAdd(ctx.builder, a, b, "addtmp");
-
-//     // Add the AST and result comparison
-//     const expr = Expr{
-//         .Binary = Binary{
-//             .op = BinaryOp.Add,
-//             .left = Expr{ .Literal = Literal{ .i32 = 5 } },
-//             .right = Expr{ .Literal = Literal{ .i32 = 10 } },
-//         },
-//     };
-
-//     const actualAST = try codegen(expr, ctx.module, ctx.builder, ctx.context, null, null);
-
-//     // Compare the AST and result
-//     if (actualAST == expectedAST) {
-//         std.testing.expect(actualAST == expectedAST);
-//     } else {
-//         std.testing.expect(false);
-//     }
-// }
