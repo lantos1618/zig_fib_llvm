@@ -13,6 +13,11 @@ pub const BinaryOp = enum {
     Subtract,
     Multiply,
     Divide,
+    Equals,
+    LessThan,
+    GreaterThan,
+    LessThanEquals,
+    GreaterThanEquals,
 };
 
 // Enum for unary operations
@@ -114,6 +119,11 @@ pub fn codegen(
                 .Subtract => llvm.LLVMBuildSub(builder, left, right, "subtmp"),
                 .Multiply => llvm.LLVMBuildMul(builder, left, right, "multmp"),
                 .Divide => llvm.LLVMBuildSDiv(builder, left, right, "divtmp"),
+                .Equals => llvm.LLVMBuildICmp(builder, llvm.LLVMIntEQ, left, right, "eqtmp"),
+                .LessThan => llvm.LLVMBuildICmp(builder, llvm.LLVMIntSLT, left, right, "lttmp"),
+                .LessThanEquals => llvm.LLVMBuildICmp(builder, llvm.LLVMIntSLE, left, right, "letmp"),
+                .GreaterThan => llvm.LLVMBuildICmp(builder, llvm.LLVMIntSGT, left, right, "mttmp"),
+                .GreaterThanEquals => llvm.LLVMBuildICmp(builder, llvm.LLVMIntSGE, left, right, "metmp"),
             };
         },
         .Unary => |unary| {
@@ -235,13 +245,17 @@ pub fn codegen(
             for (program) |program_expr| {
                 _ = try codegen(program_expr, module, mainBuilder, context, mainFunc, symbol_table, allocator);
             }
+
+            // we want to call it now
+            // call the main program
+            _ = llvm.LLVMBuildCall2(mainBuilder, mainFuncType, mainFunc, null, 0, "calltmp");
             return null;
         },
         .Loop => |loop| {
             // create a body, latch and exit block to context
-            const body = llvm.LLVMAppendBasicBlockInContext(context.?, func.?, "body");
-            const latch = llvm.LLVMAppendBasicBlockInContext(context.?, func.?, "latch");
-            const exit = llvm.LLVMAppendBasicBlockInContext(context.?, func.?, "exit");
+            const body = llvm.LLVMAppendBasicBlockInContext(context.?, func.?, "loop.body");
+            const latch = llvm.LLVMAppendBasicBlockInContext(context.?, func.?, "loop.latch");
+            const exit = llvm.LLVMAppendBasicBlockInContext(context.?, func.?, "loop.exit");
 
             // create a builder for the body
             const bodyBuilder = llvm.LLVMCreateBuilderInContext(context.?);
@@ -290,7 +304,7 @@ pub fn main() !void {
     };
 
     var loop_body = [_]*Expr{&a_assign_a_plus};
-    var loop_condition = Expr{ .Binary = Binary{ .op = BinaryOp.Add, .left = &a_expr, .right = &one } };
+    var loop_condition = Expr{ .Binary = Binary{ .op = BinaryOp.LessThanEquals, .left = &a_expr, .right = &one } };
     var loop_expr = Expr{ .Loop = Loop{ .condition = &loop_condition, .body = &loop_body } };
     var program_exprs = [_]*Expr{ &a_assign, &a_assign_a_plus, &loop_expr };
 
