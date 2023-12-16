@@ -31,50 +31,175 @@ pub const Literal = union(enum) {
     i32: i32,
     f64: f64,
     i64: i64,
+
+    pub fn gen(self: Literal) !llvm.LLVMValueRef {
+        return switch (self) {
+            .i32 => llvm.LLVMConstInt(llvm.LLVMInt32Type(), self.i32, false),
+            .f64 => llvm.LLVMConstReal(llvm.LLVMFloatType(), self.f64),
+            .i64 => llvm.LLVMConstInt(llvm.LLVMInt64Type(), self.i64, false),
+        };
+    }
 };
 
 // Struct for identifiers
 pub const Identifier = struct {
     name: []const u8,
+
+    pub fn gen(
+        self: Identifier,
+        module: *llvm.LLVMModuleRef,
+        builder: *llvm.LLVMBuilderRef,
+        ctx: *llvm.LLVMContextRef,
+        func: *?llvm.LLVMValueRef,
+    ) !llvm.LLVMValueRef {
+        // if we have a functionCtx we want to add the identifier to the functionCtx
+        // otherwise we want to add it to the global context
+
+        if (func != null) {
+            const alloca = llvm.LLVMBuildAlloca(builder, llvm.LLVMInt32TypeInContext(ctx), self.name);
+            _ = llvm.LLVMBuildStore(builder, llvm.LLVMConstInt(llvm.LLVMInt32TypeInContext(ctx), 0, false), alloca);
+            return alloca;
+        }
+
+        const global = llvm.LLVMAddGlobal(module, llvm.LLVMInt32TypeInContext(ctx), self.name);
+        _ = llvm.LLVMSetInitializer(global, llvm.LLVMConstInt(llvm.LLVMInt32TypeInContext(ctx), 0, false));
+        _ = llvm.LLVMSetLinkage(global, llvm.LLVMExternalLinkage);
+        return global;
+    }
 };
 
 // Struct for assignments
 pub const Assignment = struct {
     identifier: Identifier,
     expr: ?*Expr,
+
+    pub fn gen(self: Assignment, builder: *llvm.LLVMBuilderRef, ctx: *llvm.LLVMContextRef) !void {
+        const ident = self.identifier.name;
+        const expr = try self.expr.gen(builder);
+
+        const alloca = llvm.LLVMBuildAlloca(builder, llvm.LLVMInt32TypeInContext(ctx), ident);
+        _ = llvm.LLVMBuildStore(builder, expr, alloca);
+        return;
+    }
 };
 
 // Struct for function definitions
 pub const FuncDef = struct {
     name: Identifier,
-    params: []Expr,
-    return_type: ?*Expr,
+    params: []*TypeDef,
+    return_type: ?*TypeDef,
     body: ?*Expr,
+
+    pub fn gen(self: FuncDef, builder: *llvm.LLVMBuilderRef, ctx: *llvm.LLVMContextRef, module: *llvm.LLVMModuleRef) !void {
+
+        // we need to check our expr for loop because we need to provide loop.exit
+        const name = self.name.name;
+
+        const return_type = self.return_type.gen(builder);
+
+        const func_type = llvm.LLVMFunctionType(return_type, null, 0, false);
+        const func = llvm.LLVMAddFunction(module, name, func_type);
+
+        const entry = llvm.LLVMAppendBasicBlockInContext(ctx, func, "function.entry");
+        _ = llvm.LLVMPositionBuilderAtEnd(builder, entry);
+
+        const alloca = llvm.LLVMBuildAlloca(builder, llvm.LLVMInt32TypeInContext(ctx), name);
+        _ = llvm.LLVMBuildStore(builder, llvm.LLVMConstInt(llvm.LLVMInt32TypeInContext(ctx), 0, false), alloca);
+
+        _ = llvm.LLVMBuildRet(builder, llvm.LLVMBuildLoad(builder, llvm.LLVMInt32TypeInContext(ctx), alloca));
+        _ = llvm.LLVMVerifyFunction(func, llvm.LLVMPrintMessageAction);
+        return;
+    }
 };
 
 // Struct for type definitions
 pub const TypeDef = struct {
     name: Identifier,
     type_expr: ?*Expr,
+
+    pub fn gen() !llvm.LLVMTypeRef {}
 };
 
 // Struct for if statements
 pub const IfStatement = struct {
     condition: ?*Expr,
     then_branch: []*Expr,
-    else_branch: []*Expr,
+
+    pub fn gen(self: IfStatement, builder: *llvm.LLVMBuilderRef, ctx: *llvm.LLVMContextRef, func: *llvm.LLVMValueRef, exit_block: *llvm.LLVMBasicBlockRef) !void {
+        // if
+        //     cond
+        //     then
+        //     exit
+
+        _ = llvm.LLVMAppendBasicBlockInContext(ctx, func, "if");
+        _ = llvm.LLVMAppendBasicBlockInContext(ctx, func, "if.cond");
+        _ = llvm.LLVMAppendBasicBlockInContext(ctx, func, "if.then");
+        _ = llvm.LLVMAppendBasicBlockInContext(ctx, func, "if.exit");
+
+        const if_cond = self.condition.gen(builder);
+        const if_then = self.then_branch.gen(builder);
+
+        _ = llvm.LLVMBuildBr(builder, if_cond);
+        _ = llvm.LLVMPositionBuilderAtEnd(builder, if_cond);
+
+        _ = llvm.LLVMBuildCondBr(builder, if_cond, if_then, exit_block);
+
+        return;
+    }
 };
 
 // Struct for loops
 pub const Loop = struct {
     condition: ?*Expr,
     body: []*Expr,
+
+    pub fn gen(self: Loop, builder: *llvm.LLVMBuilderRef, ctx: *llvm.LLVMContextRef, func: *llvm.LLVMValueRef, exit_block: *llvm.LLVMBasicBlockRef) !void {
+        // loop
+        //     cond
+        //     body
+        //     exit
+
+        _ = llvm.LLVMAppendBasicBlockInContext(ctx, func, "loop");
+        _ = llvm.LLVMAppendBasicBlockInContext(ctx, func, "loop.cond");
+        _ = llvm.LLVMAppendBasicBlockInContext(ctx, func, "loop.body");
+        _ = llvm.LLVMAppendBasicBlockInContext(ctx, func, "loop.exit");
+
+        const loop_cond = self.condition.gen(builder);
+        const loop_body = self.body.gen(builder);
+
+        _ = llvm.LLVMBuildBr(builder, loop_cond);
+        _ = llvm.LLVMPositionBuilderAtEnd(builder, loop_cond);
+
+        _ = llvm.LLVMBuildCondBr(builder, loop_cond, loop_body, exit_block);
+        _ = llvm.LLVMPositionBuilderAtEnd(builder, loop_body);
+
+        _ = llvm.LLVMBuildBr(builder, loop_cond);
+        _ = llvm.LLVMPositionBuilderAtEnd(builder, exit_block);
+
+        return;
+    }
 };
 
 pub const Binary = struct {
     op: BinaryOp,
     left: ?*Expr,
     right: ?*Expr,
+
+    pub fn gen(self: Binary, builder: *llvm.LLVMBuilderRer) !llvm.LLVMValueRef {
+        const lhs = try self.left.gen(builder);
+        const rhs = try self.right.gen(builder);
+        return switch (self.op) {
+            .Add => llvm.LLVMBuildAdd(builder, lhs, rhs, "add_tmp"),
+            .Subtract => llvm.LLVMBuildSub(builder, lhs, rhs, "sub_tmp"),
+            .Multiply => llvm.LLVMBuildMul(builder, lhs, rhs, "mul_tmp"),
+            .Divide => llvm.LLVMBuildSDiv(builder, lhs, rhs, "div_tmp"),
+            .Equals => llvm.LLVMBuildICmp(builder, llvm.LLVMIntEQ, lhs, rhs, "eq_tmp"),
+            .LessThan => llvm.LLVMBuildICmp(builder, llvm.LLVMIntSLT, lhs, rhs, "lt_tmp"),
+            .GreaterThan => llvm.LLVMBuildICmp(builder, llvm.LLVMIntSGT, lhs, rhs, "gt_tmp"),
+            .LessThanEquals => llvm.LLVMBuildICmp(builder, llvm.LLVMIntSLE, lhs, rhs, "le_tmp"),
+            .GreaterThanEquals => llvm.LLVMBuildICmp(builder, llvm.LLVMIntSGE, lhs, rhs, "ge_tmp"),
+        };
+    }
 };
 
 pub const Unary = struct {
@@ -96,196 +221,25 @@ pub const Expr = union(enum) {
     Loop: Loop,
     Program: []*Expr,
     Stmt: []*Expr,
+
+    pub fn gen(self: Expr, builder: *llvm.LLVMBuilderRef, ctx: *llvm.LLVMContextRef, module: *llvm.LLVMModuleRef, symbol_table: *std.StringArrayHashMap(?llvm.LLVMValueRef)) !?llvm.LLVMValueRef {
+        _ = symbol_table;
+        _ = module;
+        switch (self) {
+            .Binary => return self.Binary.gen(builder),
+            .Unary => return self.Unary.gen(builder),
+            .Literal => return self.Literal.gen(),
+            .Identifier => return llvm.LLVMBuildLoad(builder, llvm.LLVMInt32TypeInContext(ctx), self.Identifier.name),
+            .Assignment => return self.Assignment.gen(builder, ctx),
+            .FuncDef => return null,
+            .TypeDef => return null,
+            .IfStatement => return null,
+            .Loop => return null,
+            .Program => return null,
+            .Stmt => return null,
+        }
+    }
 };
-
-pub fn codegen(
-    expr: ?*Expr,
-    module: llvm.LLVMModuleRef,
-    builder: llvm.LLVMBuilderRef,
-    context: ?llvm.LLVMContextRef,
-    func: ?llvm.LLVMValueRef,
-    symbol_table: *std.StringArrayHashMap(?llvm.LLVMValueRef),
-    allocator: std.mem.Allocator,
-) !llvm.LLVMValueRef {
-    // unwrap the expression
-    const t_expr = expr.?.*;
-
-    return try switch (t_expr) {
-        .Binary => |binary| {
-            const left = try codegen(binary.left, module, builder, context, null, symbol_table, allocator);
-            const right = try codegen(binary.right, module, builder, context, null, symbol_table, allocator);
-            return switch (binary.op) {
-                .Add => llvm.LLVMBuildAdd(builder, left, right, "addtmp"),
-                .Subtract => llvm.LLVMBuildSub(builder, left, right, "subtmp"),
-                .Multiply => llvm.LLVMBuildMul(builder, left, right, "multmp"),
-                .Divide => llvm.LLVMBuildSDiv(builder, left, right, "divtmp"),
-                .Equals => llvm.LLVMBuildICmp(builder, llvm.LLVMIntEQ, left, right, "eqtmp"),
-                .LessThan => llvm.LLVMBuildICmp(builder, llvm.LLVMIntSLT, left, right, "lttmp"),
-                .LessThanEquals => llvm.LLVMBuildICmp(builder, llvm.LLVMIntSLE, left, right, "letmp"),
-                .GreaterThan => llvm.LLVMBuildICmp(builder, llvm.LLVMIntSGT, left, right, "mttmp"),
-                .GreaterThanEquals => llvm.LLVMBuildICmp(builder, llvm.LLVMIntSGE, left, right, "metmp"),
-            };
-        },
-        .Unary => |unary| {
-            const operand = try codegen(unary.expr, module, builder, context, null, symbol_table, allocator);
-            return switch (unary.op) {
-                .Negate => llvm.LLVMBuildNeg(builder, operand, "negtmp"),
-                .Not => llvm.LLVMBuildNot(builder, operand, "nottmp"),
-            };
-        },
-        .Literal => |literal| {
-            return switch (literal) {
-                .i32 => |i| llvm.LLVMConstInt(
-                    llvm.LLVMInt32Type(),
-                    @as(c_ulonglong, @intCast(i)),
-                    @as(llvm.LLVMBool, 0),
-                ),
-                .i64 => |i| llvm.LLVMConstInt(llvm.LLVMInt64Type(), @as(c_ulonglong, @intCast(i)), 0),
-                .f64 => |f| llvm.LLVMConstReal(llvm.LLVMFloatType(), f),
-            };
-        },
-        .Identifier => |identifier| {
-            // Assuming you have a symbol table to look up variable values
-            const table_res = symbol_table.get(identifier.name);
-            if (table_res) |v| {
-                // check to see if the value is not null
-                if (v == null) {
-                    return error.NullValue;
-                }
-                const varValue = llvm.LLVMBuildLoad2(
-                    builder,
-                    // get the value type from llvm symbol
-                    llvm.LLVMTypeOf(v.?),
-                    v.?,
-                    identifier.name.ptr,
-                );
-                return varValue;
-            } else unreachable; // Or handle error
-        },
-
-        .Assignment => |assignment| {
-            const value = try codegen(assignment.expr, module, builder, context, null, symbol_table, allocator);
-            // RHS should be a llvmValueRef
-            if (value == null) {
-                return error.NullValue;
-            }
-            // check if the variable exists then update it and return
-            const variable = symbol_table.get(assignment.identifier.name);
-            if (variable) |v| {
-                if (v == null) {
-                    return error.NullValue;
-                }
-                return llvm.LLVMBuildStore(builder, value, v.?);
-            }
-
-            // If the variable doesn't exist, create it
-            const ty = llvm.LLVMTypeOf(value);
-            const name = assignment.identifier.name;
-
-            std.log.info("Creating variable name: {s}, type: {any}\n", .{ name, ty });
-            const alloca_variable = llvm.LLVMBuildAlloca(builder, ty, name.ptr);
-            if (alloca_variable == null) {
-                return error.NullAlloca;
-            }
-            // Store the variable in the symbol table
-            _ = try symbol_table.put(assignment.identifier.name, alloca_variable);
-            // Store the value in the variable
-            return llvm.LLVMBuildStore(builder, value, alloca_variable);
-        },
-        .FuncDef => |funcDef| {
-            // Create a function type
-            var paramsRef = try allocator.alloc(llvm.LLVMValueRef, funcDef.params.len);
-
-            for (funcDef.params, 0..) |*param, i| {
-                paramsRef[i] = try codegen(param, module, builder, context, null, symbol_table, allocator);
-            }
-
-            var paramTypes = try allocator.alloc(llvm.LLVMTypeRef, funcDef.params.len);
-
-            for (paramsRef, 0..) |paramRef, i| {
-                paramTypes[i] = llvm.LLVMTypeOf(paramRef);
-            }
-
-            var returnType = try codegen(funcDef.return_type, module, builder, context, null, symbol_table, allocator);
-            _ = returnType;
-
-            const funcType = llvm.LLVMFunctionType(
-                llvm.LLVMInt32Type(),
-                paramTypes.ptr,
-                @as(c_uint, @intCast(funcDef.params.len)),
-                @as(llvm.LLVMBool, 0),
-            );
-
-            // Create the function
-            const func_def = llvm.LLVMAddFunction(module, "func", funcType);
-            // Create a basic block
-            const entry = llvm.LLVMAppendBasicBlock(func_def, "entry");
-            _ = entry;
-            // Create a builder for the basic block
-            const funcBuilder = llvm.LLVMCreateBuilder();
-
-            var body = try codegen(funcDef.body, module, funcBuilder, context, null, symbol_table, allocator);
-            _ = body;
-
-            return func_def;
-        },
-        .Program => |program| {
-            // create main function
-            const mainFuncType = llvm.LLVMFunctionType(
-                llvm.LLVMInt32Type(),
-                null,
-                0,
-                @as(llvm.LLVMBool, 0),
-            );
-            const mainFunc = llvm.LLVMAddFunction(module, "main", mainFuncType);
-            const entry = llvm.LLVMAppendBasicBlock(mainFunc, "entry");
-            const mainBuilder = llvm.LLVMCreateBuilder();
-            llvm.LLVMPositionBuilderAtEnd(mainBuilder, entry);
-
-            for (program) |program_expr| {
-                _ = try codegen(program_expr, module, mainBuilder, context, mainFunc, symbol_table, allocator);
-            }
-
-            // we want to call it now
-            // call the main program
-            _ = llvm.LLVMBuildCall2(mainBuilder, mainFuncType, mainFunc, null, 0, "calltmp");
-            return null;
-        },
-        .Loop => |loop| {
-            // create a body, latch and exit block to context
-            const body = llvm.LLVMAppendBasicBlockInContext(context.?, func.?, "loop.body");
-            const latch = llvm.LLVMAppendBasicBlockInContext(context.?, func.?, "loop.latch");
-            const exit = llvm.LLVMAppendBasicBlockInContext(context.?, func.?, "loop.exit");
-
-            // create a builder for the body
-            const bodyBuilder = llvm.LLVMCreateBuilderInContext(context.?);
-            llvm.LLVMPositionBuilderAtEnd(bodyBuilder, body);
-
-            // create a builder for the latch
-            const latchBuilder = llvm.LLVMCreateBuilderInContext(context.?);
-            llvm.LLVMPositionBuilderAtEnd(latchBuilder, latch);
-
-            // create a builder for the exit
-            const exitBuilder = llvm.LLVMCreateBuilderInContext(context.?);
-            llvm.LLVMPositionBuilderAtEnd(exitBuilder, exit);
-
-            // create a condition
-            const condition = try codegen(loop.condition, module, bodyBuilder, context.?, func.?, symbol_table, allocator);
-            // create body
-            for (loop.body) |body_expr| {
-                _ = try codegen(body_expr, module, bodyBuilder, context.?, func.?, symbol_table, allocator);
-            }
-            // create a branch
-            _ = llvm.LLVMBuildCondBr(bodyBuilder, condition, body, exit);
-            // create a branch
-            _ = llvm.LLVMBuildBr(latchBuilder, body);
-            // create a branch
-            _ = llvm.LLVMBuildBr(exitBuilder, latch);
-            return null;
-        },
-        else => unreachable,
-    };
-}
 
 pub fn main() !void {
     var a = Identifier{ .name = "a" };
@@ -344,7 +298,7 @@ pub fn main() !void {
     ).init(allocator);
     defer symbol_table.deinit();
 
-    var ref = try codegen(&program, module, builder, context, null, &symbol_table, allocator);
+    var ref = try program.gen(builder, context, module, &symbol_table);
     _ = ref;
     llvm.LLVMDumpModule(module);
 }
