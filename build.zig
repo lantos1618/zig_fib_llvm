@@ -20,13 +20,19 @@ pub fn build(b: *std.Build) void {
         .name = "zig_fib_llvm",
         // In this case the main source file is merely a path, however, in more
         // complicated build scripts, this could be a generated file.
+        // .root_source_file = .{ .path = "src/fib.zig" },
+        // .root_source_file = .{ .path = "src/fib_llvm.zig" },
+        // .root_source_file = .{ .path = "src/fib_mlir.zig" },
         .root_source_file = .{ .path = "src/main.zig" },
         .target = target,
         .optimize = optimize,
     });
 
     switch (builtin.target.os.tag) {
-        .linux => exe.linkSystemLibrary("LLVM-17"), // Ubuntu
+        .linux => {
+            exe.linkSystemLibrary("LLVM-17");
+            exe.linkSystemLibrary("MLIR-17");
+        }, // Ubuntu
         .macos => {
             exe.addLibraryPath(.{
                 .path = "/opt/homebrew/opt/llvm/lib",
@@ -35,8 +41,12 @@ pub fn build(b: *std.Build) void {
                 .path = "/opt/homebrew/opt/llvm/include",
             });
             exe.linkSystemLibrary("LLVM");
+            exe.linkSystemLibrary("MLIR");
         },
-        else => exe.linkSystemLibrary("LLVM"),
+        else => {
+            exe.linkSystemLibrary("LLVM");
+            exe.linkSystemLibrary("MLIR");
+        },
     }
     // exe.linkLibC();
 
